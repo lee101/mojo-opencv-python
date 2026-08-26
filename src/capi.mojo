@@ -1,14 +1,11 @@
 """Image-processing kernels exposed through a compact C ABI."""
 
-from std.algorithm import parallelize
 from std.math import floor, sqrt
 from std.sys.info import simd_width_of
 
-comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
-comptime U8Ptr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
+comptime Ptr = Pointer[Float64, AnyOrigin[mut=True]]
+comptime U8Ptr = Pointer[UInt8, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime PARALLEL_PIXELS = 65536
-comptime PARALLEL_WORKERS = 36
 
 
 def p(addr: Int) -> Ptr:
@@ -49,7 +46,7 @@ def sample(
     var xx = border_index(x, w, border)
     if yy < 0 or xx < 0:
         return border_value
-    return src[(yy * w + xx) * c + ch]
+    return src[unsafe_offset=(yy * w + xx) * c + ch]
 
 
 def sample_u8(
@@ -60,7 +57,7 @@ def sample_u8(
     var xx = border_index(x, w, border)
     if yy < 0 or xx < 0:
         return border_value
-    return src[(yy * w + xx) * c + ch]
+    return src[unsafe_offset=(yy * w + xx) * c + ch]
 
 
 def correlate(
@@ -68,7 +65,7 @@ def correlate(
     kh: Int, kw: Int, ay: Int, ax: Int, delta: Float64,
     border: Int, border_value: Float64
 ):
-    @parameter
+    @__parameter
     def row(y: Int):
         var interior_y = y >= ay and y < h - (kh - ay - 1)
         var left = ax if interior_y else w
@@ -78,11 +75,11 @@ def correlate(
                 var acc = delta
                 for ky in range(kh):
                     for kx in range(kw):
-                        acc += kernel[ky * kw + kx] * sample(
+                        acc += kernel[unsafe_offset=ky * kw + kx] * sample(
                             src, y + ky - ay, x + kx - ax, ch,
                             h, w, c, border, border_value
                         )
-                dst[(y * w + x) * c + ch] = acc
+                dst[unsafe_offset=(y * w + x) * c + ch] = acc
         var begin = left * c
         var end = right * c
         var i = begin
@@ -91,10 +88,10 @@ def correlate(
             for ky in range(kh):
                 var source_row = (y + ky - ay) * w * c
                 for kx in range(kw):
-                    acc_vec += kernel[ky * kw + kx] * src.load[width=W](
+                    acc_vec += kernel[unsafe_offset=ky * kw + kx] * src.unsafe_load[width=W](
                         source_row + (left + kx - ax) * c + i - begin
                     )
-            dst.store(y * w * c + i, acc_vec)
+            dst.unsafe_store(y * w * c + i, acc_vec)
             i += W
         while i < end:
             var x = i // c
@@ -102,27 +99,24 @@ def correlate(
             var acc_tail = delta
             for ky in range(kh):
                 for kx in range(kw):
-                    acc_tail += kernel[ky * kw + kx] * src[
+                    acc_tail += kernel[unsafe_offset=ky * kw + kx] * src[unsafe_offset=
                         ((y + ky - ay) * w + x + kx - ax) * c + ch
                     ]
-            dst[y * w * c + i] = acc_tail
+            dst[unsafe_offset=y * w * c + i] = acc_tail
             i += 1
         for x in range(right, w):
             for ch in range(c):
                 var acc = delta
                 for ky in range(kh):
                     for kx in range(kw):
-                        acc += kernel[ky * kw + kx] * sample(
+                        acc += kernel[unsafe_offset=ky * kw + kx] * sample(
                             src, y + ky - ay, x + kx - ax, ch,
                             h, w, c, border, border_value
                         )
-                dst[(y * w + x) * c + ch] = acc
+                dst[unsafe_offset=(y * w + x) * c + ch] = acc
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(h):
+        row(y)
 
 
 def correlate_u8(
@@ -130,7 +124,7 @@ def correlate_u8(
     kh: Int, kw: Int, ay: Int, ax: Int, delta: Float64,
     border: Int, border_value: UInt8
 ):
-    @parameter
+    @__parameter
     def row(y: Int):
         var interior_y = y >= ay and y < h - (kh - ay - 1)
         var left = ax if interior_y else w
@@ -140,11 +134,11 @@ def correlate_u8(
                 var acc = delta
                 for ky in range(kh):
                     for kx in range(kw):
-                        acc += kernel[ky * kw + kx] * Float64(sample_u8(
+                        acc += kernel[unsafe_offset=ky * kw + kx] * Float64(sample_u8(
                             src, y + ky - ay, x + kx - ax, ch,
                             h, w, c, border, border_value
                         ))
-                dst[(y * w + x) * c + ch] = acc
+                dst[unsafe_offset=(y * w + x) * c + ch] = acc
         var begin = left * c
         var end = right * c
         var i = begin
@@ -153,11 +147,11 @@ def correlate_u8(
             for ky in range(kh):
                 var source_row = (y + ky - ay) * w * c
                 for kx in range(kw):
-                    var values = src.load[width=W](
+                    var values = src.unsafe_load[width=W](
                         source_row + (left + kx - ax) * c + i - begin
                     ).cast[DType.float64]()
-                    acc_vec += kernel[ky * kw + kx] * values
-            dst.store(y * w * c + i, acc_vec)
+                    acc_vec += kernel[unsafe_offset=ky * kw + kx] * values
+            dst.unsafe_store(y * w * c + i, acc_vec)
             i += W
         while i < end:
             var x = i // c
@@ -165,27 +159,24 @@ def correlate_u8(
             var acc_tail = delta
             for ky in range(kh):
                 for kx in range(kw):
-                    acc_tail += kernel[ky * kw + kx] * Float64(src[
+                    acc_tail += kernel[unsafe_offset=ky * kw + kx] * Float64(src[unsafe_offset=
                         ((y + ky - ay) * w + x + kx - ax) * c + ch
                     ])
-            dst[y * w * c + i] = acc_tail
+            dst[unsafe_offset=y * w * c + i] = acc_tail
             i += 1
         for x in range(right, w):
             for ch in range(c):
                 var acc = delta
                 for ky in range(kh):
                     for kx in range(kw):
-                        acc += kernel[ky * kw + kx] * Float64(sample_u8(
+                        acc += kernel[unsafe_offset=ky * kw + kx] * Float64(sample_u8(
                             src, y + ky - ay, x + kx - ax, ch,
                             h, w, c, border, border_value
                         ))
-                dst[(y * w + x) * c + ch] = acc
+                dst[unsafe_offset=(y * w + x) * c + ch] = acc
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(h):
+        row(y)
 
 
 @export("mcv_filter2d")
@@ -221,9 +212,9 @@ def mcv_median(
     var work = p(scratch)
     var r = ksize // 2
     var count = ksize * ksize
-    @parameter
+    @__parameter
     def row(y: Int):
-        var row_work = work + y * count
+        var row_work = work.unsafe_offset(y * count)
         for x in range(w):
             for ch in range(c):
                 var n = 0
@@ -233,18 +224,15 @@ def mcv_median(
                             s, y + ky - r, x + kx - r, ch, h, w, c, 1, 0.0
                         )
                         var j = n
-                        while j > 0 and row_work[j - 1] > value:
-                            row_work[j] = row_work[j - 1]
+                        while j > 0 and row_work[unsafe_offset=j - 1] > value:
+                            row_work[unsafe_offset=j] = row_work[unsafe_offset=j - 1]
                             j -= 1
-                        row_work[j] = value
+                        row_work[unsafe_offset=j] = value
                         n += 1
-                d[(y * w + x) * c + ch] = row_work[count // 2]
+                d[unsafe_offset=(y * w + x) * c + ch] = row_work[unsafe_offset=count // 2]
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(h):
+        row(y)
 
 
 @export("mcv_median_u8")
@@ -256,9 +244,9 @@ def mcv_median_u8(
     var work = p_u8(scratch)
     var r = ksize // 2
     var count = ksize * ksize
-    @parameter
+    @__parameter
     def row(y: Int):
-        var row_work = work + y * count
+        var row_work = work.unsafe_offset(y * count)
         for x in range(w):
             for ch in range(c):
                 var n = 0
@@ -269,18 +257,15 @@ def mcv_median_u8(
                             1, UInt8(0)
                         )
                         var j = n
-                        while j > 0 and row_work[j - 1] > value:
-                            row_work[j] = row_work[j - 1]
+                        while j > 0 and row_work[unsafe_offset=j - 1] > value:
+                            row_work[unsafe_offset=j] = row_work[unsafe_offset=j - 1]
                             j -= 1
-                        row_work[j] = value
+                        row_work[unsafe_offset=j] = value
                         n += 1
-                d[(y * w + x) * c + ch] = row_work[count // 2]
+                d[unsafe_offset=(y * w + x) * c + ch] = row_work[unsafe_offset=count // 2]
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(h):
+        row(y)
 
 
 def interp(
@@ -339,7 +324,7 @@ def mcv_resize(
     var d = p(dst)
     var scale_y = Float64(sh) / Float64(dh)
     var scale_x = Float64(sw) / Float64(dw)
-    @parameter
+    @__parameter
     def row(y: Int):
         for x in range(dw):
             var sy = Float64(y) * scale_y
@@ -348,15 +333,12 @@ def mcv_resize(
                 sy = (Float64(y) + 0.5) * scale_y - 0.5
                 sx = (Float64(x) + 0.5) * scale_x - 0.5
             for ch in range(c):
-                d[(y * dw + x) * c + ch] = interp(
+                d[unsafe_offset=(y * dw + x) * c + ch] = interp(
                     s, sy, sx, ch, sh, sw, c, interpolation, 1, 0.0
                 )
 
-    if dh * dw * c >= PARALLEL_PIXELS:
-        parallelize[row](dh, min(dh, PARALLEL_WORKERS))
-    else:
-        for y in range(dh):
-            row(y)
+    for y in range(dh):
+        row(y)
 
 
 @export("mcv_resize_u8")
@@ -368,7 +350,7 @@ def mcv_resize_u8(
     var d = p(dst)
     var scale_y = Float64(sh) / Float64(dh)
     var scale_x = Float64(sw) / Float64(dw)
-    @parameter
+    @__parameter
     def row(y: Int):
         for x in range(dw):
             var sy = Float64(y) * scale_y
@@ -377,15 +359,12 @@ def mcv_resize_u8(
                 sy = (Float64(y) + 0.5) * scale_y - 0.5
                 sx = (Float64(x) + 0.5) * scale_x - 0.5
             for ch in range(c):
-                d[(y * dw + x) * c + ch] = interp_u8(
+                d[unsafe_offset=(y * dw + x) * c + ch] = interp_u8(
                     s, sy, sx, ch, sh, sw, c, interpolation
                 )
 
-    if dh * dw * c >= PARALLEL_PIXELS:
-        parallelize[row](dh, min(dh, PARALLEL_WORKERS))
-    else:
-        for y in range(dh):
-            row(y)
+    for y in range(dh):
+        row(y)
 
 
 @export("mcv_warp")
@@ -397,14 +376,14 @@ def mcv_warp(
     var s = p(src)
     var d = p(dst)
     var m = p(matrix)
-    @parameter
+    @__parameter
     def row(y: Int):
         for x in range(dw):
             var den = 1.0
             if perspective != 0:
-                den = m[6] * Float64(x) + m[7] * Float64(y) + m[8]
-            var sx = (m[0] * Float64(x) + m[1] * Float64(y) + m[2]) / den
-            var sy = (m[3] * Float64(x) + m[4] * Float64(y) + m[5]) / den
+                den = m[unsafe_offset=6] * Float64(x) + m[unsafe_offset=7] * Float64(y) + m[unsafe_offset=8]
+            var sx = (m[unsafe_offset=0] * Float64(x) + m[unsafe_offset=1] * Float64(y) + m[unsafe_offset=2]) / den
+            var sy = (m[unsafe_offset=3] * Float64(x) + m[unsafe_offset=4] * Float64(y) + m[unsafe_offset=5]) / den
             var interp_mode = interpolation
             if interpolation == 0:
                 interp_mode = 2
@@ -412,15 +391,12 @@ def mcv_warp(
                 sx = floor(sx * 32.0 + 0.5) / 32.0
                 sy = floor(sy * 32.0 + 0.5) / 32.0
             for ch in range(c):
-                d[(y * dw + x) * c + ch] = interp(
+                d[unsafe_offset=(y * dw + x) * c + ch] = interp(
                     s, sy, sx, ch, sh, sw, c, interp_mode, border, border_value
                 )
 
-    if dh * dw * c >= PARALLEL_PIXELS:
-        parallelize[row](dh, min(dh, PARALLEL_WORKERS))
-    else:
-        for y in range(dh):
-            row(y)
+    for y in range(dh):
+        row(y)
 
 
 @export("mcv_morph")
@@ -432,7 +408,7 @@ def mcv_morph(
     var s = p(src)
     var d = p(dst)
     var k = p(kernel)
-    @parameter
+    @__parameter
     def row(y: Int):
         var interior_y = y >= ay and y < h - (kh - ay - 1)
         var left = ax if interior_y else w
@@ -442,7 +418,7 @@ def mcv_morph(
                 var best = 1.7976931348623157e308 if operation == 0 else -1.7976931348623157e308
                 for ky in range(kh):
                     for kx in range(kw):
-                        if k[ky * kw + kx] == 0.0:
+                        if k[unsafe_offset=ky * kw + kx] == 0.0:
                             continue
                         var value = sample(
                             s, y + ky - ay, x + kx - ax, ch,
@@ -454,7 +430,7 @@ def mcv_morph(
                         else:
                             if value > best:
                                 best = value
-                d[(y * w + x) * c + ch] = best
+                d[unsafe_offset=(y * w + x) * c + ch] = best
         var begin = left * c
         var end = right * c
         var i = begin
@@ -465,12 +441,12 @@ def mcv_morph(
             for ky in range(kh):
                 var source_row = (y + ky - ay) * w * c
                 for kx in range(kw):
-                    if k[ky * kw + kx] != 0.0:
-                        var value = s.load[width=W](
+                    if k[unsafe_offset=ky * kw + kx] != 0.0:
+                        var value = s.unsafe_load[width=W](
                             source_row + (left + kx - ax) * c + i - begin
                         )
                         best_vec = min(best_vec, value) if operation == 0 else max(best_vec, value)
-            d.store(y * w * c + i, best_vec)
+            d.unsafe_store(y * w * c + i, best_vec)
             i += W
         while i < end:
             var x = i // c
@@ -478,35 +454,32 @@ def mcv_morph(
             var best_tail = 1.7976931348623157e308 if operation == 0 else -1.7976931348623157e308
             for ky in range(kh):
                 for kx in range(kw):
-                    if k[ky * kw + kx] != 0.0:
-                        var value = s[
+                    if k[unsafe_offset=ky * kw + kx] != 0.0:
+                        var value = s[unsafe_offset=
                             ((y + ky - ay) * w + x + kx - ax) * c + ch
                         ]
                         best_tail = (
                             min(best_tail, value) if operation == 0
                             else max(best_tail, value)
                         )
-            d[y * w * c + i] = best_tail
+            d[unsafe_offset=y * w * c + i] = best_tail
             i += 1
         for x in range(right, w):
             for ch in range(c):
                 var best = 1.7976931348623157e308 if operation == 0 else -1.7976931348623157e308
                 for ky in range(kh):
                     for kx in range(kw):
-                        if k[ky * kw + kx] == 0.0:
+                        if k[unsafe_offset=ky * kw + kx] == 0.0:
                             continue
                         var value = sample(
                             s, y + ky - ay, x + kx - ax, ch,
                             h, w, c, border, border_value
                         )
                         best = min(best, value) if operation == 0 else max(best, value)
-                d[(y * w + x) * c + ch] = best
+                d[unsafe_offset=(y * w + x) * c + ch] = best
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(h):
+        row(y)
 
 
 def gray_sample(src: Ptr, y: Int, x: Int, h: Int, w: Int) -> Float64:
@@ -544,7 +517,7 @@ def mcv_corner(
     var d = p(dst)
     var r = block_size // 2
     var scale = input_scale / (4.0 * Float64(block_size))
-    @parameter
+    @__parameter
     def row(y: Int):
         for x in range(w):
             var a = 0.0
@@ -560,15 +533,12 @@ def mcv_corner(
                     b += gx * gy
                     q += gy * gy
             if min_eigen != 0:
-                d[y * w + x] = 0.5 * (a + q - sqrt((a - q) * (a - q) + 4.0 * b * b))
+                d[unsafe_offset=y * w + x] = 0.5 * (a + q - sqrt((a - q) * (a - q) + 4.0 * b * b))
             else:
-                d[y * w + x] = a * q - b * b - k * (a + q) * (a + q)
+                d[unsafe_offset=y * w + x] = a * q - b * b - k * (a + q) * (a + q)
 
-    if h * w >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(h):
+        row(y)
 
 
 @export("mcv_canny")
@@ -583,66 +553,63 @@ def mcv_canny(
     var gy = p(gy_addr)
     var st = p(state)
     var q = p(queue)
-    @parameter
+    @__parameter
     def gradient_row(y: Int):
         for x in range(w):
             var i = y * w + x
-            gx[i] = sobel_x(s, y, x, h, w)
-            gy[i] = sobel_y(s, y, x, h, w)
+            gx[unsafe_offset=i] = sobel_x(s, y, x, h, w)
+            gy[unsafe_offset=i] = sobel_y(s, y, x, h, w)
             if l2 != 0:
-                m[i] = sqrt(gx[i] * gx[i] + gy[i] * gy[i])
+                m[unsafe_offset=i] = sqrt(gx[unsafe_offset=i] * gx[unsafe_offset=i] + gy[unsafe_offset=i] * gy[unsafe_offset=i])
             else:
-                m[i] = abs(gx[i]) + abs(gy[i])
-            st[i] = 0.0
-            d[i] = 0.0
+                m[unsafe_offset=i] = abs(gx[unsafe_offset=i]) + abs(gy[unsafe_offset=i])
+            st[unsafe_offset=i] = 0.0
+            d[unsafe_offset=i] = 0.0
 
-    if h * w >= PARALLEL_PIXELS:
-        parallelize[gradient_row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            gradient_row(y)
+    for y in range(h):
+        gradient_row(y)
     var tail = 0
     for y in range(1, h - 1):
         for x in range(1, w - 1):
             var i = y * w + x
-            var ax = abs(gx[i])
-            var ay = abs(gy[i])
+            var ax = abs(gx[unsafe_offset=i])
+            var ay = abs(gy[unsafe_offset=i])
             var n1 = 0.0
             var n2 = 0.0
             var keep = False
             if ay * 2.414213562373095 < ax:
-                n1 = m[i - 1]
-                n2 = m[i + 1]
-                keep = m[i] > n1 and m[i] >= n2
+                n1 = m[unsafe_offset=i - 1]
+                n2 = m[unsafe_offset=i + 1]
+                keep = m[unsafe_offset=i] > n1 and m[unsafe_offset=i] >= n2
             elif ax * 2.414213562373095 < ay:
-                n1 = m[i - w]
-                n2 = m[i + w]
-                keep = m[i] > n1 and m[i] >= n2
-            elif gx[i] * gy[i] > 0.0:
-                n1 = m[i - w - 1]
-                n2 = m[i + w + 1]
-                keep = m[i] > n1 and m[i] > n2
+                n1 = m[unsafe_offset=i - w]
+                n2 = m[unsafe_offset=i + w]
+                keep = m[unsafe_offset=i] > n1 and m[unsafe_offset=i] >= n2
+            elif gx[unsafe_offset=i] * gy[unsafe_offset=i] > 0.0:
+                n1 = m[unsafe_offset=i - w - 1]
+                n2 = m[unsafe_offset=i + w + 1]
+                keep = m[unsafe_offset=i] > n1 and m[unsafe_offset=i] > n2
             else:
-                n1 = m[i - w + 1]
-                n2 = m[i + w - 1]
-                keep = m[i] > n1 and m[i] > n2
-            if keep and m[i] >= low:
-                st[i] = 1.0
-                if m[i] >= high:
-                    st[i] = 2.0
-                    q[tail] = Float64(i)
+                n1 = m[unsafe_offset=i - w + 1]
+                n2 = m[unsafe_offset=i + w - 1]
+                keep = m[unsafe_offset=i] > n1 and m[unsafe_offset=i] > n2
+            if keep and m[unsafe_offset=i] >= low:
+                st[unsafe_offset=i] = 1.0
+                if m[unsafe_offset=i] >= high:
+                    st[unsafe_offset=i] = 2.0
+                    q[unsafe_offset=tail] = Float64(i)
                     tail += 1
     var head = 0
     while head < tail:
-        var i = Int(q[head])
+        var i = Int(q[unsafe_offset=head])
         head += 1
-        d[i] = 255.0
+        d[unsafe_offset=i] = 255.0
         var y = i // w
         var x = i - y * w
         for yy in range(y - 1, y + 2):
             for xx in range(x - 1, x + 2):
                 var j = yy * w + xx
-                if yy >= 0 and yy < h and xx >= 0 and xx < w and st[j] == 1.0:
-                    st[j] = 2.0
-                    q[tail] = Float64(j)
+                if yy >= 0 and yy < h and xx >= 0 and xx < w and st[unsafe_offset=j] == 1.0:
+                    st[unsafe_offset=j] = 2.0
+                    q[unsafe_offset=tail] = Float64(j)
                     tail += 1
