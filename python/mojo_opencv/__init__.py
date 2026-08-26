@@ -184,12 +184,29 @@ def sepFilter2D(
     src, ddepth, kernelX, kernelY, dst=None, anchor=(-1, -1), delta=0,
     borderType=BORDER_DEFAULT
 ):
-    kx = f64(kernelX).reshape(-1)
-    ky = f64(kernelY).reshape(-1)
-    return filter2D(
-        src, ddepth, np.outer(ky, kx), dst=dst, anchor=anchor,
-        delta=delta, borderType=borderType,
-    )
+    original, converted, h, w, channels = _image(src)
+    source = np.ascontiguousarray(original) if original.dtype == np.uint8 else converted
+    kx = _finite_array(kernelX, "kernelX").reshape(-1)
+    ky = _finite_array(kernelY, "kernelY").reshape(-1)
+    if not kx.size or not ky.size:
+        raise ValueError("separable kernels must not be empty")
+    ax, ay = _anchor(anchor, (ky.size, kx.size))
+    border, _ = _border(borderType)
+    if border == BORDER_WRAP:
+        raise NotImplementedError("sepFilter2D does not support BORDER_WRAP")
+    scratch = np.empty(source.shape, dtype=np.float64)
+    result = np.empty(source.shape, dtype=np.float64)
+    if original.dtype == np.uint8:
+        lib().mcv_sepfilter2d_u8(
+            addr(source), addr(result), addr(scratch), addr(kx), addr(ky),
+            h, w, channels, ky.size, kx.size, ay, ax, float(delta), border, 0,
+        )
+    else:
+        lib().mcv_sepfilter2d(
+            addr(source), addr(result), addr(scratch), addr(kx), addr(ky),
+            h, w, channels, ky.size, kx.size, ay, ax, float(delta), border, 0.0,
+        )
+    return _cast_output(result, _dtype_for_depth(ddepth, original.dtype), dst)
 
 
 def boxFilter(
@@ -240,8 +257,10 @@ def GaussianBlur(
         if kh == 0:
             kh = int(round(float(sigma_y) * 6 + 1)) | 1
     sigma_y = sigmaX if sigmaY <= 0 else sigmaY
-    kernel = np.outer(_gaussian_kernel(kh, sigma_y), _gaussian_kernel(kw, sigmaX))
-    return filter2D(src, -1, kernel, dst, (-1, -1), 0, borderType)
+    return sepFilter2D(
+        src, -1, _gaussian_kernel(kw, sigmaX),
+        _gaussian_kernel(kh, sigma_y), dst, (-1, -1), 0, borderType,
+    )
 
 
 def medianBlur(src, ksize, dst=None):
@@ -252,7 +271,7 @@ def medianBlur(src, ksize, dst=None):
     if original.dtype == np.uint8 and original.ndim in (2, 3):
         source = np.ascontiguousarray(original)
         result = np.empty_like(source)
-        scratch = np.empty((h, ksize * ksize), dtype=np.uint8)
+        scratch = np.empty((h, 256), dtype=np.uint32)
         lib().mcv_median_u8(
             addr(source), addr(result), addr(scratch), h, w, channels, ksize
         )
@@ -335,7 +354,22 @@ def resize(src, dsize, dst=None, fx=0, fy=0, interpolation=INTER_LINEAR):
         raise NotImplementedError("resize supports INTER_NEAREST and INTER_LINEAR")
     shape = (dh, dw) if source.ndim == 2 else (dh, dw, channels)
     result = np.empty(shape, dtype=np.float64)
-    if native_u8:
+    if native_u8 and interpolation == INTER_LINEAR:
+        sx = (np.arange(dw, dtype=np.float64) + 0.5) * sw / dw - 0.5
+        sy = (np.arange(dh, dtype=np.float64) + 0.5) * sh / dh - 0.5
+        x0 = np.floor(sx).astype(np.int64)
+        y0 = np.floor(sy).astype(np.int64)
+        xa = np.ascontiguousarray(np.clip(x0, 0, sw - 1))
+        xb = np.ascontiguousarray(np.clip(x0 + 1, 0, sw - 1))
+        ya = np.ascontiguousarray(np.clip(y0, 0, sh - 1))
+        yb = np.ascontiguousarray(np.clip(y0 + 1, 0, sh - 1))
+        fx_values = np.ascontiguousarray(sx - x0)
+        fy_values = np.ascontiguousarray(sy - y0)
+        lib().mcv_resize_linear_u8(
+            addr(source), addr(result), addr(xa), addr(xb), addr(fx_values),
+            addr(ya), addr(yb), addr(fy_values), sw, dh, dw, channels,
+        )
+    elif native_u8:
         lib().mcv_resize_u8(
             addr(source), addr(result), sh, sw, dh, dw, channels, interpolation
         )
@@ -537,9 +571,12 @@ def cornerHarris(src, blockSize, ksize, k, dst=None, borderType=BORDER_DEFAULT):
     if channels != 1:
         raise ValueError("cornerHarris requires a single-channel image")
     result = np.empty((h, w), dtype=np.float64)
+    gx = np.empty((h, w), dtype=np.float64)
+    gy = np.empty((h, w), dtype=np.float64)
     input_scale = 1 / 255 if original.dtype == np.uint8 else 1.0
     lib().mcv_corner(
-        addr(source), addr(result), h, w, int(blockSize), float(k), 0, input_scale
+        addr(source), addr(result), addr(gx), addr(gy), h, w,
+        int(blockSize), float(k), 0, input_scale
     )
     return _cast_output(result, np.float32, dst)
 
@@ -551,9 +588,12 @@ def cornerMinEigenVal(src, blockSize, dst=None, ksize=3, borderType=BORDER_DEFAU
     if channels != 1:
         raise ValueError("cornerMinEigenVal requires a single-channel image")
     result = np.empty((h, w), dtype=np.float64)
+    gx = np.empty((h, w), dtype=np.float64)
+    gy = np.empty((h, w), dtype=np.float64)
     input_scale = 1 / 255 if original.dtype == np.uint8 else 1.0
     lib().mcv_corner(
-        addr(source), addr(result), h, w, int(blockSize), 0.0, 1, input_scale
+        addr(source), addr(result), addr(gx), addr(gy), h, w,
+        int(blockSize), 0.0, 1, input_scale
     )
     return _cast_output(result, np.float32, dst)
 

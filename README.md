@@ -91,20 +91,24 @@ OpenCV time divided by Mojo time, so values below 1 mean Mojo is slower.
 
 | Kernel | Mojo (ms) | OpenCV (ms) | Speedup |
 |---|---:|---:|---:|
-| filter2D 1024x1024 f64, 7x7 | 21.87 | 23.03 | 1.053x |
-| GaussianBlur 1024x1024 u8, 7x7 | 38.21 | 1.74 | 0.046x |
-| medianBlur 1024x1024 u8, 5x5 | 73.62 | 3.13 | 0.043x |
-| resize 1024x1024x3 -> 640x640 | 48.01 | 2.67 | 0.056x |
-| warpAffine 1024x1024 f64 | 16.32 | 15.32 | 0.939x |
-| erode 1024x1024 u8, 7x7 | 17.88 | 0.69 | 0.039x |
-| cornerHarris 1024x1024 u8 | 31.87 | 11.45 | 0.359x |
-| Canny 1024x1024 u8 | 85.52 | 25.78 | 0.301x |
+| filter2D 1024x1024 f64, 7x7 | 9.72 | 18.64 | 1.917x |
+| GaussianBlur 1024x1024 u8, 7x7 | 37.30 | 1.46 | 0.039x |
+| medianBlur 1024x1024 u8, 5x5 | 48.67 | 3.14 | 0.065x |
+| resize 1024x1024x3 -> 640x640 | 37.23 | 1.55 | 0.042x |
+| warpAffine 1024x1024 f64 | 16.69 | 12.08 | 0.724x |
+| erode 1024x1024 u8, 7x7 | 18.93 | 0.87 | 0.046x |
+| cornerHarris 1024x1024 u8 | 23.18 | 12.36 | 0.533x |
+| Canny 1024x1024 u8 | 77.94 | 20.82 | 0.267x |
 
-Mojo is slightly faster on `filter2D` in this run. OpenCV retains a large lead
-where it uses separable, histogram-based, or specialized morphology algorithms
-while this port still uses direct kernels.
+Mojo is faster on `filter2D` in this run. Gaussian blur uses
+separable passes, uint8 median blur uses a sliding histogram, resize precomputes
+linear interpolation coordinates, and corner detection reuses staged Sobel
+gradients. OpenCV retains a large lead in its more specialized image kernels.
 
-No GPU path is included or benchmarked.
+No GPU path is included or benchmarked. After these CPU specializations the
+covered kernels are stencil, order-statistic, interpolation, or graph-traversal
+operations with roughly two or fewer arithmetic operations per byte moved.
+Their transfer and launch costs do not justify competing for the shared GPU.
 
 ## How it works
 

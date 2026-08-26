@@ -90,6 +90,15 @@ def test_gaussian_blur_matches_opencv(dtype):
         assert_close(actual, expected, atol=5e-13)
 
 
+def test_gaussian_separable_parallel_tail_matches_opencv():
+    image = np.random.default_rng(89).integers(
+        0, 256, (256, 257), dtype=np.uint8
+    )
+    actual = mcv.GaussianBlur(image, (7, 7), 1.4)
+    expected = cv2.GaussianBlur(image, (7, 7), 1.4)
+    assert np.max(np.abs(actual.astype(int) - expected.astype(int))) <= 1
+
+
 @pytest.mark.parametrize("ksize", [3, 5])
 def test_median_blur_is_exact(ksize):
     image = rng.integers(0, 256, (27, 29, 3), dtype=np.uint8)
@@ -152,6 +161,15 @@ def test_resize_fx_fy_and_dst():
     assert returned is target
     assert np.array_equal(target, cv2.resize(image, (0, 0), fx=0.5, fy=0.5,
                                              interpolation=cv2.INTER_NEAREST))
+
+
+def test_resize_u8_precomputed_parallel_tail_matches_opencv():
+    image = np.random.default_rng(90).integers(
+        0, 256, (256, 257, 3), dtype=np.uint8
+    )
+    actual = mcv.resize(image, (193, 191))
+    expected = cv2.resize(image, (193, 191))
+    assert np.max(np.abs(actual.astype(int) - expected.astype(int))) <= 1
 
 
 def test_rotation_matrix_matches_opencv():
