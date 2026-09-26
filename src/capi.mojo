@@ -1,6 +1,5 @@
 """Image-processing kernels exposed through a compact C ABI."""
 
-from std.algorithm import parallelize
 from std.math import floor, sqrt
 from std.sys.info import simd_width_of
 
@@ -9,8 +8,6 @@ comptime U8Ptr = Pointer[UInt8, AnyOrigin[mut=True]]
 comptime U32Ptr = Pointer[UInt32, AnyOrigin[mut=True]]
 comptime IntPtr = Pointer[Int, AnyOrigin[mut=True]]
 comptime W = simd_width_of[DType.float64]()
-comptime PARALLEL_PIXELS = 65536
-comptime PARALLEL_WORKERS = 8
 
 
 def p(addr: Int) -> Ptr:
@@ -76,9 +73,9 @@ def sample_u8(
 def correlate(
     src: Ptr, dst: Ptr, kernel: Ptr, h: Int, w: Int, c: Int,
     kh: Int, kw: Int, ay: Int, ax: Int, delta: Float64,
-    border: Int, border_value: Float64
+    border: Int, border_value: Float64, y0: Int, y1: Int
 ):
-    @parameter
+    @__parameter
     def row(y: Int):
         var interior_y = y >= ay and y < h - (kh - ay - 1)
         var left = ax if interior_y else w
@@ -128,19 +125,16 @@ def correlate(
                         )
                 dst[unsafe_offset=(y * w + x) * c + ch] = acc
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 def correlate_u8(
     src: U8Ptr, dst: Ptr, kernel: Ptr, h: Int, w: Int, c: Int,
     kh: Int, kw: Int, ay: Int, ax: Int, delta: Float64,
-    border: Int, border_value: UInt8
+    border: Int, border_value: UInt8, y0: Int, y1: Int
 ):
-    @parameter
+    @__parameter
     def row(y: Int):
         var interior_y = y >= ay and y < h - (kh - ay - 1)
         var left = ax if interior_y else w
@@ -191,22 +185,19 @@ def correlate_u8(
                         ))
                 dst[unsafe_offset=(y * w + x) * c + ch] = acc
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 @export("mcv_filter2d")
 def mcv_filter2d(
     src: Int, dst: Int, kernel: Int, h: Int, w: Int, c: Int,
     kh: Int, kw: Int, ay: Int, ax: Int, delta: Float64,
-    border: Int, border_value: Float64
+    border: Int, border_value: Float64, y0: Int, y1: Int
 ) abi("C"):
     correlate(
         p(src), p(dst), p(kernel), h, w, c, kh, kw, ay, ax,
-        delta, border, border_value
+        delta, border, border_value, y0, y1
     )
 
 
@@ -214,11 +205,11 @@ def mcv_filter2d(
 def mcv_filter2d_u8(
     src: Int, dst: Int, kernel: Int, h: Int, w: Int, c: Int,
     kh: Int, kw: Int, ay: Int, ax: Int, delta: Float64,
-    border: Int, border_value: Int
+    border: Int, border_value: Int, y0: Int, y1: Int
 ) abi("C"):
     correlate_u8(
         p_u8(src), p(dst), p(kernel), h, w, c, kh, kw, ay, ax,
-        delta, border, UInt8(border_value)
+        delta, border, UInt8(border_value), y0, y1
     )
 
 
@@ -228,13 +219,16 @@ def mcv_sepfilter2d(
     h: Int, w: Int, c: Int, kh: Int, kw: Int, ay: Int, ax: Int,
     delta: Float64, border: Int, border_value: Float64
 ) abi("C"):
+    # Both passes share `scratch`, so the vertical pass needs a barrier after
+    # the horizontal one. A separable filter is 1-D and stays bandwidth-bound
+    # at any realistic kernel size, so the whole image runs in one call.
     correlate(
         p(src), p(scratch), p(kernel_x), h, w, c, 1, kw, 0, ax,
-        0.0, border, border_value
+        0.0, border, border_value, 0, h
     )
     correlate(
         p(scratch), p(dst), p(kernel_y), h, w, c, kh, 1, ay, 0,
-        delta, border, border_value
+        delta, border, border_value, 0, h
     )
 
 
@@ -246,24 +240,25 @@ def mcv_sepfilter2d_u8(
 ) abi("C"):
     correlate_u8(
         p_u8(src), p(scratch), p(kernel_x), h, w, c, 1, kw, 0, ax,
-        0.0, border, UInt8(border_value)
+        0.0, border, UInt8(border_value), 0, h
     )
     correlate(
         p(scratch), p(dst), p(kernel_y), h, w, c, kh, 1, ay, 0,
-        delta, border, Float64(border_value)
+        delta, border, Float64(border_value), 0, h
     )
 
 
 @export("mcv_median")
 def mcv_median(
-    src: Int, dst: Int, scratch: Int, h: Int, w: Int, c: Int, ksize: Int
+    src: Int, dst: Int, scratch: Int, h: Int, w: Int, c: Int, ksize: Int,
+    y0: Int, y1: Int
 ) abi("C"):
     var s = p(src)
     var d = p(dst)
     var work = p(scratch)
     var r = ksize // 2
     var count = ksize * ksize
-    @parameter
+    @__parameter
     def row(y: Int):
         var row_work = work.unsafe_offset(y * count)
         for x in range(w):
@@ -282,23 +277,21 @@ def mcv_median(
                         n += 1
                 d[unsafe_offset=(y * w + x) * c + ch] = row_work[unsafe_offset=count // 2]
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 @export("mcv_median_u8")
 def mcv_median_u8(
-    src: Int, dst: Int, scratch: Int, h: Int, w: Int, c: Int, ksize: Int
+    src: Int, dst: Int, scratch: Int, h: Int, w: Int, c: Int, ksize: Int,
+    y0: Int, y1: Int
 ) abi("C"):
     var s = p_u8(src)
     var d = p_u8(dst)
     var work = p_u32(scratch)
     var r = ksize // 2
     var count = ksize * ksize
-    @parameter
+    @__parameter
     def row(y: Int):
         var histogram = work.unsafe_offset(y * 256)
         for ch in range(c):
@@ -343,11 +336,8 @@ def mcv_median_u8(
                     below += Int(histogram[unsafe_offset=median])
                     median += 1
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 def interp(
@@ -401,7 +391,7 @@ def interp_u8(
 def mcv_resize_linear_u8(
     src: Int, dst: Int, xa_addr: Int, xb_addr: Int, fx_addr: Int,
     ya_addr: Int, yb_addr: Int, fy_addr: Int,
-    sw: Int, dh: Int, dw: Int, c: Int
+    sw: Int, dh: Int, dw: Int, c: Int, y0: Int, y1: Int
 ) abi("C"):
     var s = p_u8(src)
     var d = p(dst)
@@ -411,7 +401,7 @@ def mcv_resize_linear_u8(
     var ya = p_int(ya_addr)
     var yb = p_int(yb_addr)
     var fy_values = p(fy_addr)
-    @parameter
+    @__parameter
     def row(y: Int):
         var top = ya[unsafe_offset=y] * sw
         var bottom = yb[unsafe_offset=y] * sw
@@ -430,23 +420,20 @@ def mcv_resize_linear_u8(
                     + (q * (1.0 - fx) + z * fx) * fy
                 )
 
-    if dh * dw * c >= PARALLEL_PIXELS:
-        parallelize[row](dh, min(dh, PARALLEL_WORKERS))
-    else:
-        for y in range(dh):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 @export("mcv_resize")
 def mcv_resize(
     src: Int, dst: Int, sh: Int, sw: Int, dh: Int, dw: Int,
-    c: Int, interpolation: Int
+    c: Int, interpolation: Int, y0: Int, y1: Int
 ) abi("C"):
     var s = p(src)
     var d = p(dst)
     var scale_y = Float64(sh) / Float64(dh)
     var scale_x = Float64(sw) / Float64(dw)
-    @parameter
+    @__parameter
     def row(y: Int):
         for x in range(dw):
             var sy = Float64(y) * scale_y
@@ -459,23 +446,20 @@ def mcv_resize(
                     s, sy, sx, ch, sh, sw, c, interpolation, 1, 0.0
                 )
 
-    if dh * dw * c >= PARALLEL_PIXELS:
-        parallelize[row](dh, min(dh, PARALLEL_WORKERS))
-    else:
-        for y in range(dh):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 @export("mcv_resize_u8")
 def mcv_resize_u8(
     src: Int, dst: Int, sh: Int, sw: Int, dh: Int, dw: Int,
-    c: Int, interpolation: Int
+    c: Int, interpolation: Int, y0: Int, y1: Int
 ) abi("C"):
     var s = p_u8(src)
     var d = p(dst)
     var scale_y = Float64(sh) / Float64(dh)
     var scale_x = Float64(sw) / Float64(dw)
-    @parameter
+    @__parameter
     def row(y: Int):
         for x in range(dw):
             var sy = Float64(y) * scale_y
@@ -488,23 +472,20 @@ def mcv_resize_u8(
                     s, sy, sx, ch, sh, sw, c, interpolation
                 )
 
-    if dh * dw * c >= PARALLEL_PIXELS:
-        parallelize[row](dh, min(dh, PARALLEL_WORKERS))
-    else:
-        for y in range(dh):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 @export("mcv_warp")
 def mcv_warp(
     src: Int, dst: Int, matrix: Int, sh: Int, sw: Int, dh: Int, dw: Int,
     c: Int, perspective: Int, interpolation: Int, border: Int,
-    border_value: Float64
+    border_value: Float64, y0: Int, y1: Int
 ) abi("C"):
     var s = p(src)
     var d = p(dst)
     var m = p(matrix)
-    @parameter
+    @__parameter
     def row(y: Int):
         for x in range(dw):
             var den = 1.0
@@ -523,23 +504,20 @@ def mcv_warp(
                     s, sy, sx, ch, sh, sw, c, interp_mode, border, border_value
                 )
 
-    if dh * dw * c >= PARALLEL_PIXELS:
-        parallelize[row](dh, min(dh, PARALLEL_WORKERS))
-    else:
-        for y in range(dh):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 @export("mcv_morph")
 def mcv_morph(
     src: Int, dst: Int, kernel: Int, h: Int, w: Int, c: Int,
     kh: Int, kw: Int, ay: Int, ax: Int, operation: Int,
-    border: Int, border_value: Float64
+    border: Int, border_value: Float64, y0: Int, y1: Int
 ) abi("C"):
     var s = p(src)
     var d = p(dst)
     var k = p(kernel)
-    @parameter
+    @__parameter
     def row(y: Int):
         var interior_y = y >= ay and y < h - (kh - ay - 1)
         var left = ax if interior_y else w
@@ -609,11 +587,8 @@ def mcv_morph(
                         best = min(best, value) if operation == 0 else max(best, value)
                 d[unsafe_offset=(y * w + x) * c + ch] = best
 
-    if h * w * c >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
+    for y in range(y0, y1):
+        row(y)
 
 
 def gray_sample(src: Ptr, y: Int, x: Int, h: Int, w: Int) -> Float64:
@@ -663,32 +638,38 @@ def corner_response(
     return a * q - b * b - k * (a + q) * (a + q)
 
 
-@export("mcv_corner")
-def mcv_corner(
-    src: Int, dst: Int, gx_addr: Int, gy_addr: Int,
-    h: Int, w: Int, block_size: Int,
-    k: Float64, min_eigen: Int, input_scale: Float64
+@export("mcv_corner_gradient")
+def mcv_corner_gradient(
+    src: Int, gx_addr: Int, gy_addr: Int, h: Int, w: Int, block_size: Int,
+    input_scale: Float64, y0: Int, y1: Int
 ) abi("C"):
     var s = p(src)
-    var d = p(dst)
     var gx_buffer = p(gx_addr)
     var gy_buffer = p(gy_addr)
-    var r = block_size // 2
     var scale = input_scale / (4.0 * Float64(block_size))
-    @parameter
+
+    @__parameter
     def gradient_row(y: Int):
         for x in range(w):
             var i = y * w + x
             gx_buffer[unsafe_offset=i] = sobel_x(s, y, x, h, w) * scale
             gy_buffer[unsafe_offset=i] = sobel_y(s, y, x, h, w) * scale
 
-    if h * w >= PARALLEL_PIXELS:
-        parallelize[gradient_row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            gradient_row(y)
+    for y in range(y0, y1):
+        gradient_row(y)
 
-    @parameter
+
+@export("mcv_corner_response")
+def mcv_corner_response(
+    dst: Int, gx_addr: Int, gy_addr: Int, h: Int, w: Int, block_size: Int,
+    k: Float64, min_eigen: Int, y0: Int, y1: Int
+) abi("C"):
+    var d = p(dst)
+    var gx_buffer = p(gx_addr)
+    var gy_buffer = p(gy_addr)
+    var r = block_size // 2
+
+    @__parameter
     def row(y: Int):
         var interior_y = y >= r and y < h - (block_size - r - 1)
         var left = r if interior_y else w
@@ -735,17 +716,14 @@ def mcv_corner(
                 block_size, r, k, min_eigen
             )
 
-    if h * w >= PARALLEL_PIXELS:
-        parallelize[row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            row(y)
-
+    for y in range(y0, y1):
+        row(y)
 
 @export("mcv_canny")
 def mcv_canny(
     src: Int, dst: Int, mag: Int, gx_addr: Int, gy_addr: Int, state: Int,
-    queue: Int, h: Int, w: Int, low: Float64, high: Float64, l2: Int
+    queue: Int, h: Int, w: Int, low: Float64, high: Float64, l2: Int,
+    y0: Int, y1: Int
 ) abi("C"):
     var s = p(src)
     var d = p(dst)
@@ -754,7 +732,7 @@ def mcv_canny(
     var gy = p(gy_addr)
     var st = p(state)
     var q = p(queue)
-    @parameter
+    @__parameter
     def gradient_row(y: Int):
         for x in range(w):
             var i = y * w + x
@@ -767,11 +745,8 @@ def mcv_canny(
             st[unsafe_offset=i] = 0.0
             d[unsafe_offset=i] = 0.0
 
-    if h * w >= PARALLEL_PIXELS:
-        parallelize[gradient_row](h, min(h, PARALLEL_WORKERS))
-    else:
-        for y in range(h):
-            gradient_row(y)
+    for y in range(y0, y1):
+        gradient_row(y)
     var tail = 0
     for y in range(1, h - 1):
         for x in range(1, w - 1):

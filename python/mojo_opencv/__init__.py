@@ -6,7 +6,7 @@ import math
 
 import numpy as np
 
-from ._lib import addr, f64, lib
+from ._lib import addr, f64, lib, rows
 
 __version__ = "0.1.0"
 
@@ -165,17 +165,24 @@ def filter2D(
     if border == BORDER_WRAP:
         raise NotImplementedError("filter2D does not support BORDER_WRAP")
     result = np.empty(source.shape, dtype=np.float64)
+    common = (
+        addr(source), addr(result), addr(weights), h, w, channels,
+        weights.shape[0], weights.shape[1], ay, ax,
+    )
+    ops = w * channels * weights.shape[0] * weights.shape[1] * 2
     if native_u8:
-        lib().mcv_filter2d_u8(
-            addr(source), addr(result), addr(weights), h, w, channels,
-            weights.shape[0], weights.shape[1], ay, ax, float(delta),
-            border, 0,
+        rows(
+            lambda y0, y1: lib().mcv_filter2d_u8(
+                *common, float(delta), border, 0, y0, y1
+            ),
+            h, ops,
         )
     else:
-        lib().mcv_filter2d(
-            addr(source), addr(result), addr(weights), h, w, channels,
-            weights.shape[0], weights.shape[1], ay, ax, float(delta),
-            border, 0.0,
+        rows(
+            lambda y0, y1: lib().mcv_filter2d(
+                *common, float(delta), border, 0.0, y0, y1
+            ),
+            h, ops,
         )
     return _cast_output(result, _dtype_for_depth(ddepth, original.dtype), dst)
 
@@ -196,16 +203,14 @@ def sepFilter2D(
         raise NotImplementedError("sepFilter2D does not support BORDER_WRAP")
     scratch = np.empty(source.shape, dtype=np.float64)
     result = np.empty(source.shape, dtype=np.float64)
+    common = (
+        addr(source), addr(result), addr(scratch), addr(kx), addr(ky),
+        h, w, channels, ky.size, kx.size, ay, ax, float(delta), border,
+    )
     if original.dtype == np.uint8:
-        lib().mcv_sepfilter2d_u8(
-            addr(source), addr(result), addr(scratch), addr(kx), addr(ky),
-            h, w, channels, ky.size, kx.size, ay, ax, float(delta), border, 0,
-        )
+        lib().mcv_sepfilter2d_u8(*common, 0)
     else:
-        lib().mcv_sepfilter2d(
-            addr(source), addr(result), addr(scratch), addr(kx), addr(ky),
-            h, w, channels, ky.size, kx.size, ay, ax, float(delta), border, 0.0,
-        )
+        lib().mcv_sepfilter2d(*common, 0.0)
     return _cast_output(result, _dtype_for_depth(ddepth, original.dtype), dst)
 
 
@@ -272,15 +277,23 @@ def medianBlur(src, ksize, dst=None):
         source = np.ascontiguousarray(original)
         result = np.empty_like(source)
         scratch = np.empty((h, 256), dtype=np.uint32)
-        lib().mcv_median_u8(
-            addr(source), addr(result), addr(scratch), h, w, channels, ksize
+        rows(
+            lambda y0, y1: lib().mcv_median_u8(
+                addr(source), addr(result), addr(scratch), h, w, channels,
+                ksize, y0, y1,
+            ),
+            h, w * channels * ksize * ksize * 6,
         )
     else:
         source = converted
         result = np.empty_like(source)
         scratch = np.empty((h, ksize * ksize), dtype=np.float64)
-        lib().mcv_median(
-            addr(source), addr(result), addr(scratch), h, w, channels, ksize
+        rows(
+            lambda y0, y1: lib().mcv_median(
+                addr(source), addr(result), addr(scratch), h, w, channels,
+                ksize, y0, y1,
+            ),
+            h, w * channels * ksize * ksize * 6,
         )
     return _cast_output(result, original.dtype, dst)
 
@@ -365,17 +378,28 @@ def resize(src, dsize, dst=None, fx=0, fy=0, interpolation=INTER_LINEAR):
         yb = np.ascontiguousarray(np.clip(y0 + 1, 0, sh - 1))
         fx_values = np.ascontiguousarray(sx - x0)
         fy_values = np.ascontiguousarray(sy - y0)
-        lib().mcv_resize_linear_u8(
-            addr(source), addr(result), addr(xa), addr(xb), addr(fx_values),
-            addr(ya), addr(yb), addr(fy_values), sw, dh, dw, channels,
+        rows(
+            lambda y0, y1: lib().mcv_resize_linear_u8(
+                addr(source), addr(result), addr(xa), addr(xb), addr(fx_values),
+                addr(ya), addr(yb), addr(fy_values), sw, dh, dw, channels, y0, y1,
+            ),
+            dh, dw * channels * 9,
         )
     elif native_u8:
-        lib().mcv_resize_u8(
-            addr(source), addr(result), sh, sw, dh, dw, channels, interpolation
+        rows(
+            lambda y0, y1: lib().mcv_resize_u8(
+                addr(source), addr(result), sh, sw, dh, dw, channels,
+                interpolation, y0, y1,
+            ),
+            dh, dw * channels * 9,
         )
     else:
-        lib().mcv_resize(
-            addr(source), addr(result), sh, sw, dh, dw, channels, interpolation
+        rows(
+            lambda y0, y1: lib().mcv_resize(
+                addr(source), addr(result), sh, sw, dh, dw, channels,
+                interpolation, y0, y1,
+            ),
+            dh, dw * channels * 9,
         )
     return _cast_output(result, original.dtype, dst)
 
@@ -390,13 +414,13 @@ def _border_scalar(value):
         raise NotImplementedError("per-channel border values are not yet supported")
     return float(values[0])
 
-
 def _warp(src, matrix, dsize, dst, flags, borderMode, borderValue, perspective):
     original, source, sh, sw, channels = _image(src)
     dw, dh = _size2(dsize, "dsize")
     interpolation = int(flags) & 7
     if interpolation not in (INTER_NEAREST, INTER_LINEAR):
         raise NotImplementedError("warps support INTER_NEAREST and INTER_LINEAR")
+
     matrix = _finite_array(matrix, "matrix")
     expected = (3, 3) if perspective else (2, 3)
     if matrix.shape != expected:
@@ -412,10 +436,13 @@ def _warp(src, matrix, dsize, dst, flags, borderMode, borderValue, perspective):
         matrix = np.ascontiguousarray(np.vstack([matrix, [0, 0, 1]]))
     shape = (dh, dw) if source.ndim == 2 else (dh, dw, channels)
     result = np.empty(shape, dtype=np.float64)
-    lib().mcv_warp(
-        addr(source), addr(result), addr(matrix), sh, sw, dh, dw, channels,
-        int(perspective), interpolation, border,
-        _border_scalar(borderValue),
+    rows(
+        lambda y0, y1: lib().mcv_warp(
+            addr(source), addr(result), addr(matrix), sh, sw, dh, dw, channels,
+            int(perspective), interpolation, border,
+            _border_scalar(borderValue), y0, y1,
+        ),
+        dh, dw * channels * 9,
     )
     return _cast_output(result, original.dtype, dst)
 
@@ -510,10 +537,13 @@ def _morph(src, kernel, operation, dst, anchor, iterations, borderType, borderVa
         border_value = _border_scalar(borderValue)
     for _ in range(iterations):
         result = np.empty_like(current)
-        lib().mcv_morph(
-            addr(current), addr(result), addr(weights), h, w, channels,
-            weights.shape[0], weights.shape[1], ay, ax, operation,
-            border, border_value,
+        rows(
+            lambda y0, y1: lib().mcv_morph(
+                addr(current), addr(result), addr(weights), h, w, channels,
+                weights.shape[0], weights.shape[1], ay, ax, operation,
+                border, border_value, y0, y1,
+            ),
+            h, w * channels * weights.shape[0] * weights.shape[1],
         )
         current = result
     return _cast_output(current, original.dtype, dst)
@@ -564,6 +594,26 @@ def morphologyEx(
     return _cast_output(result, np.asarray(src).dtype, dst)
 
 
+def _corner_response(source, result, gx, gy, h, w, block_size, k, min_eigen,
+                     input_scale):
+    # The Sobel pass and the structure-tensor pass each read rows the other
+    # writes, so they are fanned out separately with a barrier between them.
+    rows(
+        lambda y0, y1: lib().mcv_corner_gradient(
+            addr(source), addr(gx), addr(gy), h, w, block_size,
+            input_scale, y0, y1,
+        ),
+        h, w * 12 * 24,
+    )
+    rows(
+        lambda y0, y1: lib().mcv_corner_response(
+            addr(result), addr(gx), addr(gy), h, w, block_size,
+            k, min_eigen, y0, y1,
+        ),
+        h, w * block_size * block_size * 6,
+    )
+
+
 def cornerHarris(src, blockSize, ksize, k, dst=None, borderType=BORDER_DEFAULT):
     if int(ksize) != 3 or int(borderType) != BORDER_DEFAULT:
         raise NotImplementedError("cornerHarris currently supports ksize=3 and BORDER_DEFAULT")
@@ -574,9 +624,8 @@ def cornerHarris(src, blockSize, ksize, k, dst=None, borderType=BORDER_DEFAULT):
     gx = np.empty((h, w), dtype=np.float64)
     gy = np.empty((h, w), dtype=np.float64)
     input_scale = 1 / 255 if original.dtype == np.uint8 else 1.0
-    lib().mcv_corner(
-        addr(source), addr(result), addr(gx), addr(gy), h, w,
-        int(blockSize), float(k), 0, input_scale
+    _corner_response(
+        source, result, gx, gy, h, w, int(blockSize), float(k), 0, input_scale
     )
     return _cast_output(result, np.float32, dst)
 
@@ -591,9 +640,8 @@ def cornerMinEigenVal(src, blockSize, dst=None, ksize=3, borderType=BORDER_DEFAU
     gx = np.empty((h, w), dtype=np.float64)
     gy = np.empty((h, w), dtype=np.float64)
     input_scale = 1 / 255 if original.dtype == np.uint8 else 1.0
-    lib().mcv_corner(
-        addr(source), addr(result), addr(gx), addr(gy), h, w,
-        int(blockSize), 0.0, 1, input_scale
+    _corner_response(
+        source, result, gx, gy, h, w, int(blockSize), 0.0, 1, input_scale
     )
     return _cast_output(result, np.float32, dst)
 
@@ -642,9 +690,12 @@ def Canny(
     result = np.empty((h, w), dtype=np.float64)
     scratch = [np.empty((h, w), dtype=np.float64) for _ in range(5)]
     low, high = sorted((float(threshold1), float(threshold2)))
+    # The Sobel pass feeds non-maximum suppression and hysteresis, which are
+    # serial anyway; fanning the gradient rows out measured slower than the
+    # serial pass, so Canny stays single-threaded.
     lib().mcv_canny(
         addr(source), addr(result), *(addr(item) for item in scratch),
-        h, w, low, high, int(L2gradient),
+        h, w, low, high, int(L2gradient), 0, h,
     )
     return _cast_output(result, np.uint8, edges)
 
